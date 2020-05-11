@@ -289,6 +289,7 @@ void setup()
 
   pinMode(PIN_NEXT, INPUT);
   pinMode(PIN_PREV, INPUT);
+  pinMode(PIN_SELECT, INPUT);
 }
 
 void loop()
