@@ -1,0 +1,50 @@
+const uint8_t MAX_NODES = 5;
+bool graph[MAX_NODES][MAX_NODES] = {false};
+
+// work out who we have direct access to
+for (uint8_t i = 0; i < MAX_NODES; ++i)
+{
+  if (i == config::getRadioID()) // don't ping ourselves, stupid
+    continue;
+  if (ping(i))
+  {
+    graph[config::getRadioID()][i] = true;
+    graph[i][config::getRadioID()] = true;
+  }
+}
+
+// for those we have direct access to, ask them who they have direct access to
+for (uint8_t i = 0; i < MAX_NODES; ++i)
+{
+  if (i == config::getRadioID())
+    continue;
+  if (graph[config::getRadioID()][i] == false)
+    continue;
+
+  Packet packet = {
+    .opcode = OpCode::GRAPH_REQUEST,
+    .source = config::getRadioID(),
+    .target = i,
+    .timestamp = millis()
+  };
+  radio.send(i, &packet, sizeof(packet));
+}
+
+// in handling incoming data
+while (radio.hasData())
+{
+  Packet packet;
+  radio.readData(&packet);
+
+  if (packet.opcode == OpCode::GRAPH_REQUEST)
+  {
+    Packet repsonse = {
+      .opcode = OpCode::GRAPH,
+      .source = config::getRadioID(),
+      .target = packet.source,
+      .timestamp = millis()
+    };
+    memcpy(&(response.graph), graph, sizeof(graph));
+    radio.send(response.target, response, sizeof(response));
+  }
+}
