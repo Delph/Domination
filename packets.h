@@ -64,6 +64,7 @@ struct Packet
     // claim / win
     struct {
       team_id team;
+      player_id player;
     };
   };
 };

@@ -17,24 +17,34 @@
 #include "types.h"
 #include "packets.h"
 
+// 0 - TX
+// 1 - RX
+// 2
 const uint8_t PIN_SPEAKER = 3;
-const uint8_t PIN_SPI_RESET = 4;
-const uint8_t PIN_LED_R = 5;
-const uint8_t PIN_LED_G = 6;
-const uint8_t PIN_LED_B = 9;
-const uint8_t PIN_RADIO_CSN = 7;
+const uint8_t PIN_PIXEL_SELECT = 4;
+// 5
+// 6
+const uint8_t PIN_RADIO_SELECT = 7;
 const uint8_t PIN_RADIO_CE = 8;
-
+// 9
 const uint8_t PIN_RFID_SELECT = 10;
-
-const uint8_t PIN_SELECT = A3;
-const uint8_t PIN_PREV = A4;
-const uint8_t PIN_NEXT = A5;
+// 11 - SPI
+// 12 - SPI
+// 13 - SPI
 
 const uint8_t TFT_DC = A0;
 const uint8_t TFT_CS = A1;
+// A2
+const uint8_t PIN_SELECT = A3;
+const uint8_t PIN_PREV = A4;
+const uint8_t PIN_NEXT = A5;
+// A6 - analog input only
+// A7 - analog input only
 
-// #define KEY_TONES
+const SPISettings settings(125000, MSBFIRST, SPI_MODE0);
+
+
+#define KEY_TONES
 #ifdef KEY_TONES
 #include "beep.h"
 #endif
@@ -45,13 +55,15 @@ const uint8_t CHANNEL = 0;
 NRFLite radio;
 
 
-MFRC522 mfrc522(PIN_RFID_SELECT, PIN_SPI_RESET);
+MFRC522 mfrc522(PIN_RFID_SELECT, UINT8_MAX);
 MFRC522::MIFARE_Key key;
 const uint8_t BLOCK = 4;
 const uint8_t TRAILER = 7;
 const uint8_t PSK[8] = {0x66, 0x75, 0xEC, 0x1C, 0x42, 0x93, 0x73, 0x96};
 const uint8_t RFID_BUFFER_LENGTH = 18;
-
+enum TokenType {
+  PLAYER = 0,
+};
 
 Debounce pinNext(PIN_NEXT);
 Debounce pinPrev(PIN_PREV);
@@ -66,8 +78,8 @@ struct NodeState
   millis_t lastPing;
   millis_t latency;
 
-  float lat;
-  float lng;
+  uint32_t lat;
+  uint32_t lng;
 
   team_id team; // who owns this node
 };
@@ -87,11 +99,13 @@ Game game = {
 };
 
 
+colour_t teamColours[2] = {COLOUR_RED, COLOUR_BLUE};
+
 // networking code
 
 inline bool radio_init()
 {
-  return radio.init(config::getRadioID(), PIN_RADIO_CE, PIN_RADIO_CSN, NRFLite::BITRATE2MBPS, config::getChannel());
+  return radio.init(config::getRadioID(), PIN_RADIO_CE, PIN_RADIO_SELECT, NRFLite::BITRATE2MBPS, config::getChannel());
 }
 
 /**
@@ -128,6 +142,8 @@ void broadcast(Packet& packet)
 }
 
 
+void cb_rerender_gameplay();
+
 void network()
 {
   // handle any incoming
@@ -137,10 +153,10 @@ void network()
     radio.readData(&packet);
 
 
-    Serial.print("PACKET: opcode; ");
-    Serial.print(static_cast<uint8_t>(packet.opcode));
-    Serial.print(", source; ");
-    Serial.println(packet.source);
+    // Serial.print("PACKET: opcode; ");
+    // Serial.print(static_cast<uint8_t>(packet.opcode));
+    // Serial.print(", source; ");
+    // Serial.println(packet.source);
     // Serial.print(", target; ");
     // Serial.println(packet.target);
 
@@ -181,12 +197,13 @@ void network()
         for (uint8_t i = 0; i < MAX_NODES; ++i)
           nodes[i].team = NO_TEAM;
       break;
+      case OpCode::WIN:
+        game.end = millis() - packet.timestamp;
+      // fallthrough
       case OpCode::CLAIM:
         nodes[packet.source].team = packet.team;
+        cb_rerender_gameplay();
       break;
-      case OpCode::WIN:
-        nodes[packet.source].team = packet.team;
-        game.end = millis() - packet.timestamp;
       default:
         // Serial.print("Unhandled packet type: ");
         // Serial.println(static_cast<uint8_t>(packet.opcode));
@@ -209,13 +226,20 @@ void network()
       // .target = i,
       .timestamp = millis()
     };
-    Serial.print("PING: ");
-    Serial.print(i);
-    Serial.print(", ");
-    Serial.println(radio.send(i, &packet, sizeof(packet)));
+    // Serial.print("PING: ");
+    // Serial.print(i);
+    // Serial.print(", ");
+    // Serial.println(radio.send(i, &packet, sizeof(packet)));
   }
 }
 
+bool node_online(const radio_id node)
+{
+  if (node == config::getRadioID())
+    return true;
+
+  return nodes[node].lastUpdate > 0;
+}
 
 uint8_t nodes_online()
 {
@@ -229,12 +253,50 @@ uint8_t nodes_online()
 }
 
 
-const uint8_t brightness = 31;
-void led(const uint32_t colour)
+/**
+ * Returns the winning team if there is one, or NO_TEAM
+ * @return winning team ID or NO_TEAM
+ */
+team_id win()
 {
-  analogWrite(PIN_LED_R, (colour >> 16) & brightness);
-  analogWrite(PIN_LED_G, (colour >> 8) & brightness);
-  analogWrite(PIN_LED_B, (colour >> 0) & brightness);
+  team_id team = NO_TEAM;
+  for (uint8_t i = 0; i < MAX_NODES; ++i)
+  {
+    // offline node
+    if (!node_online(i))
+      continue;
+
+    if (team == NO_TEAM)
+      team = nodes[i].team;
+    else if (team != nodes[i].team)
+      return NO_TEAM;
+  }
+  return team;
+}
+
+const uint8_t brightness = 31;
+// #define LED_COMMON_ANODE
+void led(colour_t colour)
+{
+  // #ifdef LED_COMMON_ANODE
+  // analogWrite(PIN_LED_R, 255 - ((channel_red(colour)) & brightness));
+  // analogWrite(PIN_LED_G, 255 - ((channel_green(colour)) & brightness));
+  // analogWrite(PIN_LED_B, 255 - ((channel_blue(colour)) & brightness));
+  // #else
+  // analogWrite(PIN_LED_R, (channel_red(colour)) & brightness);
+  // analogWrite(PIN_LED_G, (channel_green(colour)) & brightness);
+  // analogWrite(PIN_LED_B, (channel_blue(colour)) & brightness);
+  // #endif
+
+  SPI.beginTransaction(settings);
+  digitalWrite(PIN_PIXEL_SELECT, 0);
+
+  SPI.transfer((channel_red(colour)) & brightness);
+  SPI.transfer((channel_green(colour)) & brightness);
+  SPI.transfer((channel_blue(colour)) & brightness);
+
+  digitalWrite(PIN_PIXEL_SELECT, 1);
+  SPI.endTransaction();
 }
 
 #ifdef PDQ_LIBS
@@ -243,7 +305,7 @@ void led(const uint32_t colour)
 #include <PDQ_ST7735.h>
 PDQ_ST7735 tft = PDQ_ST7735();
 #else
-Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, PIN_SPI_RESET);
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1);
 #endif
 
 typedef void(*callback_t)();
@@ -775,6 +837,13 @@ private:
 class ScreenGameplay : public ScreenCommon<2>
 {
 public:
+  enum class GameplayState
+  {
+    WAITING,
+    IN_PROGRESS,
+    GAME_OVER
+  };
+
   ScreenGameplay() : ScreenCommon(),
   status(Text(8, 8, tft.height() - 16, 20, 20)),
   nodeCount(Text(8, 36, tft.height() - 16, 20, 4))
@@ -782,6 +851,7 @@ public:
     components[0] = &status;
     components[1] = &nodeCount;
 
+    setGameplayState(GameplayState::WAITING);
     nodeCount.setLabel("0");
   }
 
@@ -792,39 +862,79 @@ public:
 
     static uint8_t lastCount = 255;
     const uint8_t count = nodes_online();
+    if (count != lastCount)
+    {
+      nodeCount.setLabel(count);
+      lastCount = count;
+    }
 
     // game not started yet
     if (game.start == 0)
     {
-      status.setLabel("Waiting");
-      if (count != lastCount)
-      {
-        nodeCount.setLabel(count);
-        lastCount = count;
-      }
+      setGameplayState(GameplayState::WAITING);
     }
     // game running
     else if (game.end == 0)
     {
-      status.setLabel("In progress");
-      if (count != lastCount)
-      {
-        nodeCount.setLabel(count);
-        lastCount = count;
-      }
+      setGameplayState(GameplayState::IN_PROGRESS);
     }
     else if (game.end > game.start)
     {
-      status.setLabel("Game over");
-      nodeCount.setLabel(nodes[config::getRadioID()].team);
+      setGameplayState(GameplayState::GAME_OVER);
+    }
+  }
+
+  virtual void render()
+  {
+    ScreenCommon<2>::render();
+
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < MAX_NODES; ++i)
+    {
+      if (!node_online(i))
+        continue;
+
+      const NodeState& node = nodes[i];
+
+      if (node.team != NO_TEAM)
+      {
+        tft.fillCircle(32 + 16*count, 96, 6, teamColours[node.team]);
+      }
+      else
+      {
+        tft.fillCircle(32 + 16*count, 96, 6, COLOUR_BLACK);
+        tft.drawCircle(32 + 16*count, 96, 6, COLOUR_WHITE);
+      }
+      ++count;
+    }
+  }
+
+  void setGameplayState(GameplayState s)
+  {
+    if (s == state)
+      return;
+    state = s;
+
+    switch(state)
+    {
+      case GameplayState::WAITING:
+        status.setLabel("Waiting");
+      break;
+      case GameplayState::IN_PROGRESS:
+        status.setLabel("In progress");
+      break;
+      case GameplayState::GAME_OVER:
+        status.setLabel("Game over");
+      break;
     }
   }
 
 private:
   Text status;
   Text nodeCount;
+  GameplayState state;
 };
-ScreenGameplay play;
+ScreenGameplay screenGameplay;
 
 
 void cb_exit_scanner()
@@ -949,23 +1059,92 @@ private:
   radio_id newRadioID;
 };
 
+void cb_team_up();
+void cb_team_down();
+void cb_player_up();
+void cb_player_down();
+class ScreenTags : public ScreenCommon<9>
+{
+public:
+  ScreenTags() : ScreenCommon(),
+  back(Button(140, 4, 16, 16, "X", cb_radio_cancel)),
+  teamLabel(Label(16, 32, 64, 16, "Team")),
+  teamText(Text(80, 32, 32, 16, 4)),
+  teamUp(Button(112, 32, 16, 16, "+", cb_team_up)),
+  teamDown(Button(128, 32, 16, 16, "-", cb_team_down)),
+  playerLabel(Label(16, 64, 64, 16, "Player")),
+  playerText(Text(80, 64, 32, 16, 4)),
+  playerUp(Button(112, 64, 16, 16, "+", cb_player_up)),
+  playerDown(Button(128, 64, 16, 16, "-", cb_player_down)),
+  team(0),
+  player(0)
+  {
+    components[0] = &back;
+    components[1] = &teamLabel;
+    components[2] = &teamText;
+    components[3] = &teamUp;
+    components[4] = &teamDown;
+    components[5] = &playerLabel;
+    components[6] = &playerText;
+    components[7] = &playerUp;
+    components[8] = &playerDown;
+
+    teamText.setLabel(team);
+    playerText.setLabel(player);
+  }
+
+
+  team_id getTeamID() const { return team; }
+  void setTeamID(const team_id t)
+  {
+    team = t;
+    teamText.setLabel(t);
+  }
+
+  player_id getPlayerID() const { return player; }
+  void setPlayerID(const player_id p)
+  {
+    player = p;
+    playerText.setLabel(p);
+  }
+
+private:
+  Button back;
+
+  Label teamLabel;
+  Text teamText;
+  Button teamUp;
+  Button teamDown;
+  team_id team;
+
+  Label playerLabel;
+  Text playerText;
+  Button playerUp;
+  Button playerDown;
+  player_id player;
+};
+
 
 ScreenRadio screenRadio;
-class ScreenConfig : public ScreenCommon<2>
+ScreenTags screenTags;
+class ScreenConfig : public ScreenCommon<3>
 {
 public:
   ScreenConfig() : ScreenCommon(),
   radios(Button::gotoScreen(16, 8, tft.height() - 32, 20, "Configure Radios", &screenRadio)),
+  tags(Button::gotoScreen(16, 36, tft.height() - 32, 20, "Configure Tags", &screenTags)),
   // master(Button(16, 36, tft.height() - 32, 20, "Master Tag", cb_go_mastertag)),
   back(Button(16, 100, tft.height() - 32, 20, "Back", cb_go_back))
   {
     components[0] = &radios;
+    components[1] = &tags;
     // components[1] = &master;
-    components[1] = &back;
+    components[2] = &back;
   }
 
 private:
   Button radios;
+  Button tags;
   // Button master;
   Button back;
 };
@@ -1031,7 +1210,7 @@ inline void cb_go_screen(Screen* screen)
 
 void cb_make_node()
 {
-  screenStack[++screenIndex] = &play;
+  screenStack[++screenIndex] = &screenGameplay;
   screenStack[screenIndex]->markRerender();
 }
 
@@ -1051,17 +1230,23 @@ void cb_nodes_down()
 void cb_play_classic()
 {
   // start the game
-  Packet game = {
+  Packet packet = {
     .opcode = OpCode::GAME_SETUP,
     .source = config::getRadioID(),
     .timestamp = millis(),
   };
-  game.nodes = config::getNodeCount();
-  game.teams = 2;
+  packet.nodes = config::getNodeCount();
+  packet.teams = 2;
 
-  broadcast(game);
+  game.start = millis();
+  game.nodes = packet.nodes;
+  game.teams = packet.teams;
+  for (uint8_t i = 0; i < MAX_NODES; ++i)
+    nodes[i].team = NO_TEAM;
 
-  screenStack[++screenIndex] = &play;
+  broadcast(packet);
+
+  screenStack[++screenIndex] = &screenGameplay;
   screenStack[screenIndex]->markRerender();
 }
 
@@ -1072,7 +1257,7 @@ void cb_channel_up()
 
 void cb_channel_down()
 {
-  screenRadio.setChannel((screenRadio.getChannel() + NRFLite::MAX_NRF_CHANNEL - 1) % (NRFLite::MAX_NRF_CHANNEL + 1));
+  screenRadio.setChannel((screenRadio.getChannel() + NRFLite::MAX_NRF_CHANNEL - 1) % (NRFLite::MAX_NRF_CHANNEL));
 }
 
 void cb_radio_id_up()
@@ -1103,6 +1288,26 @@ void cb_radio_cancel()
   cb_go_back();
 }
 
+void cb_team_up()
+{
+  screenTags.setTeamID((screenTags.getTeamID() + 1) % (7 + 1));
+}
+
+void cb_team_down()
+{
+  screenTags.setTeamID((screenTags.getTeamID() + 7 - 1) % (7 + 1));
+}
+
+void cb_player_up()
+{
+  screenTags.setPlayerID((screenTags.getPlayerID() + 1) % 100);
+}
+
+void cb_player_down()
+{
+  screenTags.setPlayerID((screenTags.getPlayerID() + 100-1) % 100);
+}
+
 
 void cb_go_back()
 {
@@ -1110,12 +1315,20 @@ void cb_go_back()
   screenStack[screenIndex]->markRerender();
 }
 
-bool nfcEnabled()
+
+void cb_rerender_gameplay()
 {
-  if (screenStack[screenIndex] == &screenRadio)
-    return true;
-  return false;
+  screenGameplay.markRerender();
 }
+
+// bool nfcEnabled()
+// {
+//   if (screenStack[screenIndex] == &screenRadio)
+//     return true;
+//   if (screenStack[screenIndex] == &screenTags)
+//     return true;
+//   return false;
+// }
 
 
 
@@ -1131,17 +1344,34 @@ void gui_update()
   pinPrev.update();
   pinSelect.update();
 
-  if (nfcEnabled())
+  // if (nfcEnabled())
   {
-    uint8_t buffer[RFID_BUFFER_LENGTH];
-    uint8_t size = sizeof(buffer);
-
+    // bool success = true;
+    // if (mfrc522.PICC_IsNewCardPresent())
+    //   Serial.println("NEW CARD");
+    // else
+    //   success = false;
+    // if (success && mfrc522.PICC_ReadCardSerial())
+    //   Serial.println("READ SERIAL");
+    // else
+    //   success = false;
+    // if (success && mfrc522.PICC_GetType(mfrc522.uid.sak) == MFRC522::PICC_TYPE_MIFARE_1K)
+    //   Serial.println("GET TYPE");
+    // else
+    //   success = false;
+    // if (success && mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, TRAILER, &key, &(mfrc522.uid)) == MFRC522::STATUS_OK)
+    //   Serial.println("AUTH A");
+    // else
+    //   success = false;
+    // if (success && mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_B, TRAILER, &key, &(mfrc522.uid)) == MFRC522::STATUS_OK)
+    //   Serial.println("AUTH B");
+    // else
+    //   success = false;
     if (mfrc522.PICC_IsNewCardPresent() &&
       mfrc522.PICC_ReadCardSerial() &&
       mfrc522.PICC_GetType(mfrc522.uid.sak) == MFRC522::PICC_TYPE_MIFARE_1K &&
       mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, TRAILER, &key, &(mfrc522.uid)) == MFRC522::STATUS_OK &&
-      mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_B, TRAILER, &key, &(mfrc522.uid)) == MFRC522::STATUS_OK &&
-      mfrc522.MIFARE_Read(BLOCK, buffer, &size) == MFRC522::STATUS_OK)
+      mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_B, TRAILER, &key, &(mfrc522.uid)) == MFRC522::STATUS_OK)
     {
       if (screenStack[screenIndex] == &screenRadio)
       {
@@ -1154,6 +1384,46 @@ void gui_update()
         if (status == MFRC522::STATUS_OK)
         {
           cb_go_back();
+        }
+      }
+      else if (screenStack[screenIndex] == &screenTags)
+      {
+        uint8_t data[16] = {0};
+        memcpy(data, PSK, 8);
+        data[8] = TokenType::PLAYER;
+        data[9] = screenTags.getTeamID();
+        data[10] = screenTags.getPlayerID();
+
+        MFRC522::StatusCode status = mfrc522.MIFARE_Write(BLOCK, data, 16);
+        if (status == MFRC522::STATUS_OK)
+          screenTags.setPlayerID(screenTags.getPlayerID() + 1);
+      }
+      else if (screenStack[screenIndex] == &screenGameplay)
+      {
+        uint8_t buffer[RFID_BUFFER_LENGTH];
+        uint8_t size = sizeof(buffer);
+        mfrc522.MIFARE_Read(BLOCK, buffer, &size);
+        const bool match = memcmp(buffer, PSK, 8) == 0;
+        if (match)
+        {
+          if (buffer[8] == TokenType::PLAYER)
+          {
+            const team_id team = buffer[9];
+            const player_id player = buffer[10];
+
+            nodes[config::getRadioID()].team = team;
+            const bool won = win() != NO_TEAM;
+
+            led(teamColours[team]);
+            Packet packet = {
+              .opcode = won ? OpCode::WIN : OpCode::CLAIM,
+              .source = config::getRadioID(),
+              .timestamp = millis()
+            };
+            packet.team = team;
+            packet.player = player;
+            broadcast(packet);
+          }
         }
       }
     }
@@ -1194,10 +1464,14 @@ void gui_update()
 
 void reset()
 {
+  // turn the led off
+  led(COLOUR_BLACK);
+
   for (uint8_t i = 0; i < MAX_NODES; ++i)
   {
     nodes[i].lastUpdate = 0;
     nodes[i].lastPing = 0;
+    nodes[i].team = NO_TEAM;
 
     // clear the graph
     // for (uint8_t j = 0; j < MAX_NODES; ++j)
@@ -1212,7 +1486,19 @@ void setup()
   pinMode(PIN_PREV, INPUT);
   pinMode(PIN_SELECT, INPUT);
 
+  pinMode(PIN_PIXEL_SELECT, OUTPUT);
+  digitalWrite(PIN_PIXEL_SELECT, 1);
+
   SPI.begin();
+
+  led(COLOUR_RED);
+  delay(100);
+  led(COLOUR_GREEN);
+  delay(100);
+  led(COLOUR_BLUE);
+  delay(100);
+  led(COLOUR_WHITE);
+  delay(100);
 
   // gui init
   #ifdef PDQ_LIBS
@@ -1223,9 +1509,9 @@ void setup()
   tft.setRotation(1);
   tft.fillScreen(COLOUR_BLACK);
 
-  Serial.begin(115200);
-  Serial.println(config::getChannel());
-  Serial.println(config::getRadioID());
+  // Serial.begin(115200);
+  // Serial.println(config::getChannel());
+  // Serial.println(config::getRadioID());
 
   if (!radio_init())
   {

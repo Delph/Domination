@@ -16,6 +16,22 @@ constexpr colour_t colour(const uint8_t r, const uint8_t g, const uint8_t b)
   static_cast<colour_t>(static_cast<uint8_t>(b >> (8 - B_BITS)));
 }
 
+constexpr uint8_t channel_red(const colour_t colour)
+{
+  return ((colour >> 11) & 0b00011111) << 3;
+}
+
+constexpr uint8_t channel_green(const colour_t colour)
+{
+  return ((colour >> 5) & 0b00111111) << 2;
+}
+
+constexpr uint8_t channel_blue(const colour_t colour)
+{
+  return ((colour >> 0) & 0b00011111) << 3;
+}
+
+
 constexpr colour_t COLOUR_BLACK   = 0x0000;
 constexpr colour_t COLOUR_BLUE    = 0x001F;
 constexpr colour_t COLOUR_RED     = 0xF800;
